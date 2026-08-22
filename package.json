@@ -1,0 +1,35 @@
+{
+  "name": "sticker-sheet-studio",
+  "version": "1.0.0",
+  "description": "A local-first printable sticker sheet designer.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "node --test test/model.test.js"
+  },
+  "keywords": ["stickers", "labels", "print", "svg", "pdf", "vite"],
+  "author": "vejha",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vejha/sticker-sheet-studio.git"
+  },
+  "homepage": "https://vejha.github.io/sticker-sheet-studio/",
+  "bugs": {
+    "url": "https://github.com/vejha/sticker-sheet-studio/issues"
+  },
+  "dependencies": {
+    "@ant-design/icons": "^6.3.2",
+    "antd": "^6.5.1",
+    "jspdf": "^4.2.1",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
+  },
+  "devDependencies": {
+    "@playwright/mcp": "^0.0.78",
+    "playwright": "^1.62.0-alpha-1783623505000",
+    "vite": "^7.1.7"
+  }
+}

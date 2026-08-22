@@ -1,0 +1,37 @@
+# Dependencies and build output
+node_modules/
+dist/
+.vite/
+
+# Local environment files
+.env
+.env.*
+!.env.example
+
+# Logs and test coverage
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+coverage/
+
+# Local agent-loop run ledgers (runtime-only, never commit)
+.agent-runs/
+
+# Editor and OS files
+.vscode/
+.idea/
+*.code-workspace
+*.iml
+.DS_Store
+Thumbs.db
+
+# Local tooling configuration
+.github/
+!.github/
+!.github/workflows/
+!.github/workflows/pages.yml
+.github/agent-loop-ledger.md
+.github/agents/
+.npmrc

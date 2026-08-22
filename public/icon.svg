@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title desc">
+  <title id="title">Sticker Sheet Studio</title>
+  <desc id="desc">An upright rectangular sticker sheet.</desc>
+  <rect width="128" height="128" rx="28" fill="#6f1d35"/>
+  <rect x="25" y="15" width="78" height="98" rx="6" fill="#fffafb" stroke="#e4d6db" stroke-width="3"/>
+  <path d="M64 28v72M37 64h54" fill="none" stroke="#cdb9c0" stroke-width="2" stroke-dasharray="3 4"/>
+  <rect x="36" y="27" width="21" height="27" rx="3" fill="#8d2945"/>
+  <rect x="71" y="27" width="21" height="27" rx="3" fill="#a93b58"/>
+  <rect x="36" y="74" width="21" height="27" rx="3" fill="#f8e9ee" stroke="#a93b58" stroke-width="2.5" stroke-dasharray="4 3"/>
+  <rect x="71" y="74" width="21" height="27" rx="3" fill="#f8e9ee" stroke="#a93b58" stroke-width="2.5" stroke-dasharray="4 3"/>
+</svg>

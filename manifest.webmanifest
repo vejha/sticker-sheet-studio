@@ -1,0 +1,10 @@
+{
+  "name": "Sticker Sheet Studio",
+  "short_name": "Sticker Studio",
+  "description": "A local-first printable sticker sheet designer.",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#f7f4ed",
+  "theme_color": "#6f1d35",
+  "icons": [{ "src": "./icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}
