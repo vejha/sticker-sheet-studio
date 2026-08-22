@@ -36,17 +36,6 @@ jobs:
         run: npm run build
         env:
           VITE_BASE_PATH: /sticker-sheet-studio/
-      - name: Enable GitHub Pages
-        uses: actions/github-script@v7
-        with:
-          script: |
-            await github.rest.repos.createPagesSite({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              build_type: 'workflow'
-            }).catch(error => {
-              if (error.status !== 409) throw error;
-            });
       - name: Configure Pages
         uses: actions/configure-pages@v5
       - name: Upload Pages artifact
