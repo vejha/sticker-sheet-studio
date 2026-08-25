@@ -4,15 +4,21 @@ import { jsPDF } from 'jspdf';
 import React from 'react';
 import { flushSync } from 'react-dom';
 import { createRoot } from 'react-dom/client';
-import { App as AntApp, Button, Collapse, ColorPicker, ConfigProvider, Dropdown, Flex, Form, Input, InputNumber, Layout, Menu, Modal, Radio, Select, Slider, Space, Tabs, Tooltip, Typography, Upload, message } from 'antd';
-import { AlignCenterOutlined, AlignLeftOutlined, AlignRightOutlined, BgColorsOutlined, BlockOutlined, ColumnHeightOutlined, ColumnWidthOutlined, CopyOutlined, ExportOutlined, FileImageOutlined, FolderOpenOutlined, FullscreenOutlined, MenuOutlined, PlusCircleOutlined, ZoomInOutlined, ZoomOutOutlined } from '@ant-design/icons';
-import { contentDimensions, copyAppearanceSettings, copyStyleSettings, copyTextSettings, cropScreenDeltaToLocal, defaultState, deriveGrid, getLabelLayout, getSvg, hasLabelContent, imageCropBox, normalizeSelection, normalizeSheet, pageSize, patchSelectedCells, pdfExportGeometry, resetSelectedCells } from './model.js';
+import { App as AntApp, Button, Collapse, ColorPicker, ConfigProvider, Dropdown, Flex, Form, Input, InputNumber, Layout, Menu, Modal, Radio, Select, Slider, Space, Switch, Tabs, Tooltip, Typography, Upload, message } from 'antd';
+import { AlignCenterOutlined, AlignLeftOutlined, AlignRightOutlined, AppstoreOutlined, BgColorsOutlined, BlockOutlined, ColumnHeightOutlined, ColumnWidthOutlined, CopyOutlined, ExportOutlined, FileImageOutlined, FolderOpenOutlined, FullscreenOutlined, MenuOutlined, PlusCircleOutlined, UndoOutlined, VerticalAlignBottomOutlined, VerticalAlignMiddleOutlined, VerticalAlignTopOutlined, ZoomInOutlined, ZoomOutOutlined } from '@ant-design/icons';
+import { contentCellCoordinate, contentDimensions, copyAppearanceSettings, copyContentAtCoordinate, copyContentLayout, copyEntireLabel, copyStyleSettings, copyTextSettings, cropScreenDeltaToLocal, defaultState, deriveGrid, FONT_OPTIONS, getLabelLayout, getSvg, hasLabelContent, imageCropBox, normalizeSelection, normalizeSheet, pageSize, parseTemplateJson, patchContentAtCoordinate, patchSelectedCells, pdfExportGeometry, resetSelectedCells, resizeContentGrid, serializeTemplate, setContentGridProportions, TEMPLATE_VERSION, TemplateVersionError, templateCompatibility, trackBoundariesToWeights, trackWeightsToBoundaries } from './model.js';
 
 const STORAGE_KEY = 'sticker-sheet-studio.current.v1';
 let state = loadState(); let selected = 0; let selection = [0]; let selectionMode = false; let activeTab = 'sheet'; let skipPointerCopyClick = false;
+const HISTORY_LIMIT = 5;
+const HISTORY_COALESCE_MS = 600;
+let undoHistory = [];
+let historyCoalesceKey;
+let historyCoalesceTimer;
 // Preview zoom is deliberately view-only: it is not written to the local sheet
 // template and never participates in SVG, PDF, or print geometry.
 let previewZoom = 1;
+let previewGuides = true;
 const PREVIEW_ZOOM_MIN = .5;
 const PREVIEW_ZOOM_MAX = 3;
 let reactRoot;
@@ -36,11 +42,13 @@ function ApplicationShell() {
             ),
           ),
           React.createElement(Space, { className: 'actions desktop-actions' },
+            React.createElement(Button, { id: 'undo-change', icon: React.createElement(UndoOutlined), disabled: !undoHistory.length, onClick: undoLastChange }, 'Undo'),
             React.createElement(Button, { id: 'new-sheet', icon: React.createElement(PlusCircleOutlined), onClick: startNewSheet }, 'New'),
             React.createElement(Button, { id: 'import-sheet', icon: React.createElement(FolderOpenOutlined), onClick: openImportDialog }, 'Import'),
             React.createElement(Button, { id: 'export-sheet', type: 'primary', icon: React.createElement(ExportOutlined), onClick: openExportDialog }, 'Export'),
           ),
           React.createElement(Dropdown, { className: 'mobile-actions', trigger: ['click'], menu: { items: [
+            { key: 'undo', icon: React.createElement(UndoOutlined), label: 'Undo', disabled: !undoHistory.length, onClick: undoLastChange },
             { key: 'new', icon: React.createElement(PlusCircleOutlined), label: 'New sheet', onClick: startNewSheet },
             { key: 'import', icon: React.createElement(FolderOpenOutlined), label: 'Import template', onClick: openImportDialog },
             { key: 'export', icon: React.createElement(ExportOutlined), label: 'Export sheet', onClick: openExportDialog },
@@ -63,56 +71,176 @@ function escapeHtml(value = '') { const span = document.createElement('span'); s
 function requestRender() { reactRoot?.render(h(ApplicationShell)); }
 function setUi(patch) { ui = { ...ui, ...patch }; requestRender(); }
 function fieldValue(value) { return value === null || value === undefined ? undefined : value; }
-function setSheet(key, value) { state = { ...state, [key]: value }; updateGrid(); requestRender(); }
-function setCells(patch) { patchSelected(() => patch); requestRender(); }
+function cloneState(value = state) { return structuredClone(value); }
+function endHistoryTransaction() { historyCoalesceKey = undefined; clearTimeout(historyCoalesceTimer); historyCoalesceTimer = undefined; }
+function recordUndoSnapshot(coalesceKey) {
+  if (!coalesceKey || historyCoalesceKey !== coalesceKey) {
+    undoHistory.push(cloneState());
+    if (undoHistory.length > HISTORY_LIMIT) undoHistory.shift();
+  }
+  clearTimeout(historyCoalesceTimer);
+  historyCoalesceKey = coalesceKey;
+  if (coalesceKey) historyCoalesceTimer = setTimeout(endHistoryTransaction, HISTORY_COALESCE_MS);
+}
+function commitState(updater, { coalesceKey, normalize = false } = {}) {
+  recordUndoSnapshot(coalesceKey);
+  state = updater(state);
+  if (normalize) state = normalizeSheet(state);
+  selection = normalizeSelection(selection, state.cells.length, selected);
+  selected = selection.includes(selected) ? selected : selection[0];
+  persist(); requestRender();
+}
+function undoLastChange() {
+  if (!undoHistory.length) return;
+  endHistoryTransaction();
+  state = undoHistory.pop();
+  selection = normalizeSelection(selection, state.cells.length, selected);
+  selected = selection.includes(selected) ? selected : selection[0];
+  persist(); requestRender();
+}
+function setSheet(key, value) { if (state[key] !== value) commitState((current) => ({ ...current, [key]: value }), { coalesceKey: `sheet:${key}`, normalize: true }); }
+function setCells(patch) { patchSelected(() => patch, { coalesceKey: `labels:${selection.join(',')}:${Object.keys(patch).sort().join(',')}` }); }
 function colorValue(value) { return typeof value === 'string' ? value : value?.toHexString?.(); }
-function IconButton(props) { return h(Tooltip, { title: props.title }, h(Button, { ...props, type: props.active ? 'primary' : 'default', className: `icon-button ${props.className || ''}`, 'aria-label': props['aria-label'] || props.title, 'aria-pressed': props.active, onClick: props.onClick }, props.children)); }
-function Help({ title, children }) { return h(Tooltip, { title: children }, h(Button, { className: 'context-help', type: 'text', shape: 'circle', 'aria-label': `More information about ${title}` }, h('span', { className: 'context-help-glyph', 'aria-hidden': true }, '?'))); }
-function CopyButton({ group }) {
-  return h(Tooltip, { title: `Copy ${group} settings from label ${selected + 1} to all labels` }, h(Button, { className: 'icon-button copy', onClick: () => {
-    const source = state.cells[selected]; const copy = group === 'text' ? copyTextSettings : group === 'style' ? copyStyleSettings : copyAppearanceSettings;
-    state.cells = state.cells.map((item) => copy(source, item)); persist(); requestRender();
-  }, 'data-copy': group, 'aria-label': `Copy ${group} settings from label ${selected + 1} to all labels` }, h(CopyOutlined)));
+function IconButton({ active, className = '', children, ...props }) { return h(Tooltip, { title: props.title }, h(Button, { ...props, type: active ? 'primary' : 'default', className: `icon-button ${className}`, 'aria-label': props['aria-label'] || props.title, 'aria-pressed': active, onClick: props.onClick }, children)); }
+function IconRadioGroup({ value, onChange, label, options, className = '', ...props }) {
+  return h(Radio.Group, { ...props, className: `segmented-radio-group segmented-icon-group ${className}`, value, onChange: (event) => onChange(event.target.value), 'aria-label': label },
+    options.map((option) => h(Tooltip, { key: option.value, title: option.title }, h(Radio.Button, { value: option.value, 'aria-label': option.title, ...option.props }, option.content))),
+  );
+}
+function MillimeterInput(props) { return h(Space.Compact, { block: true }, h(InputNumber, { ...props, style: { width: '100%', ...props.style } }), h(Space.Addon, null, 'mm')); }
+function CopyButton({ group, contentIndex = 0 }) {
+  const source = state.cells[selected];
+  const coordinate = contentCellCoordinate(source.contentGrid, contentIndex);
+  const scope = group === 'layout' ? 'layout' : group === 'appearance' ? 'appearance settings' : `${group} from [${coordinate.row + 1},${coordinate.column + 1}]`;
+  const copyToAll = () => {
+    commitState((current) => {
+      let cells;
+      if (group === 'layout') cells = current.cells.map((item) => copyContentLayout(source, item));
+      else if (group === 'appearance') cells = current.cells.map((item) => copyAppearanceSettings(source, item));
+      else {
+      const copy = group === 'text' ? copyTextSettings : copyStyleSettings;
+        cells = current.cells.map((item) => copyContentAtCoordinate(source, item, contentIndex, copy));
+      }
+      return { ...current, cells };
+    });
+  };
+  return h(Tooltip, { title: `Copy ${scope} from label ${selected + 1} to all labels` }, h(Button, { className: 'icon-button copy', onClick: (event) => { event.stopPropagation(); copyToAll(); }, 'data-copy': group, 'aria-label': `Copy ${scope} from label ${selected + 1} to all labels` }, h(CopyOutlined)));
 }
 function Preview() {
   const [pageW, pageH] = pageSize(state); const layout = getLabelLayout(state);
   const markup = `${state.cells.map((item, index) => previewLabel(item, index, layout, pageW, pageH)).join('')}`;
-  return h('section', { className: 'workspace' },
-    h(Flex, { className: 'preview-controls', justify: 'space-between', wrap: true },
-      h(Space, { className: 'selection-controls' }, h(Button, { id: 'selection-mode', type: selectionMode ? 'primary' : 'default', 'aria-pressed': selectionMode, onClick: () => { selectionMode = !selectionMode; requestRender(); } }, selectionMode ? 'Multi-select mode: on' : 'Multi-select mode'), h(Help, { title: 'multi-select' }, selectionMode ? 'Tap labels to add or remove them.' : 'Use Ctrl/Cmd-click to add labels, or enable multi-select mode for touch.')),
-      h(Space, { className: 'preview-zoom-controls' }, h('span', { id: 'preview-zoom-status', 'aria-live': 'polite' }, `Zoom ${Math.round(previewZoom * 100)}%`), h(IconButton, { className: 'preview-zoom-button', title: 'Zoom out', 'data-preview-zoom': 'out', onClick: () => { previewZoom = clampPreviewZoom(previewZoom / 1.2); requestRender(); } }, h(ZoomOutOutlined)), h(IconButton, { className: 'preview-zoom-button', title: 'Zoom in', 'data-preview-zoom': 'in', onClick: () => { previewZoom = clampPreviewZoom(previewZoom * 1.2); requestRender(); } }, h(ZoomInOutlined)), h(IconButton, { className: 'preview-zoom-button', title: 'Fit preview', 'data-preview-zoom': 'fit', onClick: () => { previewZoom = 1; requestRender(); } }, h(FullscreenOutlined)), h(Help, { title: 'preview zoom' }, 'Hold Ctrl (or ⌘ on macOS) while scrolling to zoom. Zoom is view-only and never affects SVG, PDF, or print geometry.'))),
-    h('div', { className: 'canvas-wrap', id: 'preview-viewport', tabIndex: 0, 'aria-label': 'Zoomable sticker sheet preview', style: { '--ratio': pageW / pageH }, onWheel: (event) => { if (event.ctrlKey || event.metaKey) { event.preventDefault(); previewZoom = clampPreviewZoom(previewZoom * Math.exp(-event.deltaY * .0015)); requestRender(); } }, onKeyDown: (event) => { if (event.key === '+' || event.key === '=') { event.preventDefault(); previewZoom = clampPreviewZoom(previewZoom * 1.2); requestRender(); } if (event.key === '-') { event.preventDefault(); previewZoom = clampPreviewZoom(previewZoom / 1.2); requestRender(); } if (event.key === '0') { event.preventDefault(); previewZoom = 1; requestRender(); } }, onClick: (event) => { const label = event.target.closest('[data-select]'); if (label) selectLabel(Number(label.dataset.select), event.ctrlKey || event.metaKey || selectionMode); } }, h('div', { className: 'preview-stage' }, h('div', { className: 'sheet', id: 'sheet-preview', role: 'listbox', 'aria-label': 'Sticker labels', 'aria-multiselectable': true, style: { '--ratio': pageW / pageH, '--preview-width': `${previewZoom * 100}%`, '--preview-height': `${previewZoom * 54}vh`, '--preview-text-zoom': previewZoom }, dangerouslySetInnerHTML: { __html: markup } }))));
+  const artwork = getSvg(state);
+  const selectionControls = h(Space, { className: 'selection-controls' }, h(Button, { id: 'selection-mode', type: selectionMode ? 'primary' : 'default', 'aria-pressed': selectionMode, onClick: () => { selectionMode = !selectionMode; requestRender(); } }, selectionMode ? 'Multi-select mode: on' : 'Multi-select mode'));
+  const zoomControls = h(Space, { className: 'preview-zoom-controls' },
+    h(Flex, { className: 'preview-guides-toggle', align: 'center', gap: 6 }, h('span', null, 'Guides'), h(Switch, { size: 'small', className: 'preview-guides-switch', checked: previewGuides, onChange: (checked) => { previewGuides = checked; requestRender(); }, 'aria-label': 'Preview guides' })),
+    h('span', { id: 'preview-zoom-status', 'aria-live': 'polite' }, `Zoom ${Math.round(previewZoom * 100)}%`),
+    h(IconButton, { className: 'preview-zoom-button', title: 'Zoom out', 'data-preview-zoom': 'out', onClick: () => { previewZoom = clampPreviewZoom(previewZoom / 1.2); requestRender(); } }, h(ZoomOutOutlined)),
+    h(IconButton, { className: 'preview-zoom-button', title: 'Zoom in', 'data-preview-zoom': 'in', onClick: () => { previewZoom = clampPreviewZoom(previewZoom * 1.2); requestRender(); } }, h(ZoomInOutlined)),
+    h(IconButton, { className: 'preview-zoom-button', title: 'Fit preview', 'data-preview-zoom': 'fit', onClick: () => { previewZoom = 1; requestRender(); } }, h(FullscreenOutlined)),
+  );
+  const sheet = h('div', { className: `sheet ${previewGuides ? '' : 'preview-guides-hidden'}`, id: 'sheet-preview', role: 'listbox', 'aria-label': 'Sticker labels', 'aria-multiselectable': true, style: { '--ratio': pageW / pageH, '--preview-width': `${previewZoom * 100}%`, '--preview-height': `${previewZoom * 54}vh` } }, h('div', { className: 'sheet-artwork', 'aria-hidden': true, dangerouslySetInnerHTML: { __html: artwork } }), h('div', { className: 'sheet-overlay', dangerouslySetInnerHTML: { __html: markup } }));
+  const viewport = h('div', { className: 'canvas-wrap', id: 'preview-viewport', tabIndex: 0, 'aria-label': 'Zoomable sticker sheet preview', style: { '--ratio': pageW / pageH }, onWheel: (event) => { if (event.ctrlKey || event.metaKey) { event.preventDefault(); previewZoom = clampPreviewZoom(previewZoom * Math.exp(-event.deltaY * .0015)); requestRender(); } }, onKeyDown: (event) => { if (event.key === '+' || event.key === '=') { event.preventDefault(); previewZoom = clampPreviewZoom(previewZoom * 1.2); requestRender(); } if (event.key === '-') { event.preventDefault(); previewZoom = clampPreviewZoom(previewZoom / 1.2); requestRender(); } if (event.key === '0') { event.preventDefault(); previewZoom = 1; requestRender(); } }, onClick: (event) => { const label = event.target.closest('[data-select]'); if (label) selectLabel(Number(label.dataset.select), event.ctrlKey || event.metaKey || selectionMode); } }, h('div', { className: 'preview-stage' }, sheet));
+  return h('section', { className: 'workspace' }, h(Flex, { className: 'preview-controls', justify: 'space-between', wrap: true }, selectionControls, zoomControls), viewport);
 }
 function SheetForm() {
-  const derived = deriveGrid(state); const layout = getLabelLayout(state); const [pageW, pageH] = pageSize(state);
-  const number = (label, key, min, max, step = .5) => h(Form.Item, { label }, h(InputNumber, { value: fieldValue(state[key]), min, max, step, onChange: (value) => setSheet(key, value), 'data-sheet': key, style: { width: '100%' } }));
+  const [pageW, pageH] = pageSize(state);
+  const number = (label, key, min, max, step = .5) => h(Form.Item, { label }, h(MillimeterInput, { value: fieldValue(state[key]), min, max, step, onChange: (value) => setSheet(key, value), 'data-sheet': key }));
   return h(Form, { layout: 'vertical' },
     h('div', { className: 'sheet-setup-summary' }, h('h2', null, `${state.name || 'Sticker sheet'} · ${pageW.toFixed(0)} × ${pageH.toFixed(0)} mm`), h('p', null, `${state.columns} columns × ${state.rows} rows · ${state.cells.length} labels`)),
     h(Form.Item, { label: 'Sheet name' }, h(Input, { value: state.name, onChange: (e) => setSheet('name', e.target.value), 'data-sheet': 'name' })),
-    h(Flex, { gap: 8 }, h(Form.Item, { label: 'Format', style: { flex: 1 } }, h(Select, { value: state.format, onChange: (value) => setSheet('format', value), 'data-sheet': 'format', options: ['A4', 'Letter'].map((value) => ({ value })) })), h(Form.Item, { label: 'Orientation', style: { flex: 1 } }, h('div', { className: 'orientation-switch', role: 'group', 'aria-label': 'Sheet orientation', 'data-sheet': 'orientation' }, h(IconButton, { title: 'Portrait orientation', active: state.orientation === 'portrait', 'data-orientation': 'portrait', onClick: () => setSheet('orientation', 'portrait') }, h('svg', { viewBox: '0 0 16 20', 'aria-hidden': true }, h('rect', { x: 2, y: 1, width: 12, height: 18, rx: 1.5, fill: 'none', stroke: 'currentColor', strokeWidth: 2 }))), h(IconButton, { title: 'Landscape orientation', active: state.orientation === 'landscape', 'data-orientation': 'landscape', onClick: () => setSheet('orientation', 'landscape') }, h('svg', { viewBox: '0 0 20 16', 'aria-hidden': true }, h('rect', { x: 1, y: 2, width: 18, height: 12, rx: 1.5, fill: 'none', stroke: 'currentColor', strokeWidth: 2 })))))),
-    h('div', { className: 'group' }, h('h3', null, 'Sheet edges'), h(Flex, { gap: 8 }, h('div', { style: { flex: 1 } }, number('Left / right (mm)', 'marginX', 0, 100)), h('div', { style: { flex: 1 } }, number('Top / bottom (mm)', 'marginY', 0, 100)))),
-    h(Flex, { gap: 8 }, h('div', { style: { flex: 1 } }, number('Label width (mm)', 'labelWidth', 1)), h('div', { style: { flex: 1 } }, number('Label height (mm)', 'labelHeight', 1))),
-    h(Form.Item, { label: h(Space, null, 'Corner radius (mm)', h(Help, { title: 'corner radius' }, 'One radius applies to every label cutout and its print-safe artwork.')) }, h(InputNumber, { value: state.cornerRadius, min: 0, max: Math.min(state.labelWidth, state.labelHeight) / 2, step: .1, onChange: (value) => setSheet('cornerRadius', value), 'data-sheet': 'cornerRadius', style: { width: '100%' } })),
-    h('p', { className: 'derived-grid', 'aria-live': 'polite' }, h('strong', null, `${derived.columns} columns × ${derived.rows} rows fit`), h(Help, { title: 'automatic layout' }, `Interior gaps: ${layout.gapX.toFixed(2)} mm horizontal × ${layout.gapY.toFixed(2)} mm vertical.`)));
+    h(Flex, { gap: 8 }, h(Form.Item, { label: 'Format', style: { flex: 1 } }, h(Select, { value: state.format, onChange: (value) => setSheet('format', value), 'data-sheet': 'format', options: ['A4', 'Letter'].map((value) => ({ value })) })), h(Form.Item, { label: 'Orientation', style: { flex: 1 } }, h(IconRadioGroup, { value: state.orientation, onChange: (value) => setSheet('orientation', value), label: 'Sheet orientation', className: 'orientation-switch', 'data-sheet': 'orientation', options: [{ value: 'portrait', title: 'Portrait orientation', props: { 'data-orientation': 'portrait' }, content: h('svg', { viewBox: '0 0 16 20', 'aria-hidden': true }, h('rect', { x: 2, y: 1, width: 12, height: 18, rx: 1.5, fill: 'none', stroke: 'currentColor', strokeWidth: 2 })) }, { value: 'landscape', title: 'Landscape orientation', props: { 'data-orientation': 'landscape' }, content: h('svg', { viewBox: '0 0 20 16', 'aria-hidden': true }, h('rect', { x: 1, y: 2, width: 18, height: 12, rx: 1.5, fill: 'none', stroke: 'currentColor', strokeWidth: 2 })) }] }))),
+    h('div', { className: 'group' }, h('h3', null, 'Sheet edges'), h(Flex, { gap: 8 }, h('div', { style: { flex: 1 } }, number('Left / right', 'marginX', 0, 100)), h('div', { style: { flex: 1 } }, number('Top / bottom', 'marginY', 0, 100)))),
+    h('div', { className: 'group' },
+      h('h3', null, 'Label shape'),
+      h(Flex, { gap: 8 }, h('div', { style: { flex: 1 } }, number('Width', 'labelWidth', 1)), h('div', { style: { flex: 1 } }, number('Height', 'labelHeight', 1))),
+      h(Form.Item, { label: 'Corner radius' }, h(MillimeterInput, { value: state.cornerRadius, min: 0, max: Math.min(state.labelWidth, state.labelHeight) / 2, step: .1, onChange: (value) => setSheet('cornerRadius', value), 'data-sheet': 'cornerRadius' })),
+    ));
 }
 function LabelForm({ compact = false } = {}) {
   const cell = state.cells[selected];
-  const patch = (key, value, redraw = false) => setCells({ [key]: value }, redraw);
-  const number = (label, key, min, max, step = 1) => h(Form.Item, { label }, h(InputNumber, { value: fieldValue(cell[key]), min, max, step, onChange: (value) => patch(key, value), 'data-cell': key, style: { width: '100%' } }));
-  const color = (label, key) => h(Form.Item, { label }, h(ColorPicker, { value: cell[key], onChange: (value) => patch(key, colorValue(value)), 'data-cell': key, showText: true }));
-  const modeChange = (mode) => { if (mode === 'image' && !cell.image) { patch('appearanceMode', mode, true); return; } patch('appearanceMode', mode, true); };
-  const rotationControls = h(Space, null, [0, 270].map((rotation) => h(IconButton, { key: rotation, title: rotation ? 'Vertical content flow' : 'Horizontal content flow', active: cell.rotation === rotation, 'data-editor-rotation': rotation, onClick: () => patch('rotation', rotation, true) }, h(rotation ? ColumnHeightOutlined : ColumnWidthOutlined))));
-  const textGroup = h('div', { className: 'editor-section-content' }, h(Form.Item, { label: 'Text' }, h(Input.TextArea, { value: cell.text, rows: 3, onChange: (e) => patch('text', e.target.value), 'data-cell': 'text' })));
+  const layoutPresets = Array.from({ length: 3 }, (_, row) => Array.from({ length: 3 }, (_, column) => ({ value: `${column + 1}x${row + 1}`, columns: column + 1, rows: row + 1 }))).flat();
+  const [layoutCell, setLayoutCell] = React.useState(0);
+  const [layoutDraft, setLayoutDraft] = React.useState(null);
+  const activeLayout = cell.contentGrid;
+  const activeContentIndex = Math.min(layoutCell, activeLayout.cells.length - 1);
+  const activeContent = activeLayout.cells[activeContentIndex];
+  const activeCoordinate = contentCellCoordinate(activeLayout, activeContentIndex);
+  const patchLabel = (key, value) => setCells({ [key]: value });
+  const patchContentValues = (values) => commitState((current) => ({ ...current, cells: patchContentAtCoordinate(current.cells, selection, selected, activeContentIndex, () => values) }), { coalesceKey: `content:${selection.join(',')}:${activeCoordinate.row},${activeCoordinate.column}:${Object.keys(values).sort().join(',')}` });
+  const patchContent = (key, value) => patchContentValues({ [key]: value });
+  const number = (label, key, min, max, step = 1) => h(Form.Item, { label }, h(InputNumber, { value: fieldValue(activeContent[key]), min, max, step, onChange: (value) => patchContent(key, value), 'data-cell': key, style: { width: '100%' } }));
+  const color = (label, key, source, patch) => h(Form.Item, { label }, h(ColorPicker, { value: source[key], onChange: (value) => patch(key, colorValue(value)), 'data-cell': key, showText: true }));
+  const modeChange = (mode) => { if (mode === 'image' && !cell.image) { patchLabel('appearanceMode', mode); return; } patchLabel('appearanceMode', mode); };
+  const rotationControls = h(IconRadioGroup, { value: activeContent.rotation, onChange: (rotation) => patchContent('rotation', rotation), label: 'Content flow', className: 'content-flow-switch', options: [0, 270].map((rotation) => ({ value: rotation, title: rotation ? 'Vertical content flow' : 'Horizontal content flow', props: { 'data-editor-rotation': rotation }, content: h(rotation ? ColumnHeightOutlined : ColumnWidthOutlined) })) });
+  const layoutPresetLabel = ({ columns, rows }) => h('span', { className: 'layout-preset-select-label' }, h('span', { className: 'layout-preset-icon', style: { '--layout-columns': columns, '--layout-rows': rows }, 'aria-hidden': true }, Array.from({ length: columns * rows }, (_, index) => h('i', { key: index }))), h('span', null, `${columns} × ${rows}`));
+  const equalWeights = (count) => Array.from({ length: count }, () => 1 / count);
+  const openLayoutEditor = () => setLayoutDraft({ columns: activeLayout.columns, rows: activeLayout.rows, columnWeights: [...activeLayout.columnWeights], rowWeights: [...activeLayout.rowWeights] });
+  const updateBoundaries = (axis, boundaries) => setLayoutDraft((draft) => ({ ...draft, [axis]: trackBoundariesToWeights(boundaries, draft[axis].length) }));
+  const updateLayoutPreset = (value) => setLayoutDraft((draft) => {
+    const preset = layoutPresets.find((item) => item.value === value);
+    const resized = resizeContentGrid({ ...cell, contentGrid: { ...activeLayout, columns: draft.columns, rows: draft.rows, columnWeights: draft.columnWeights, rowWeights: draft.rowWeights } }, preset.columns, preset.rows).contentGrid;
+    return { columns: preset.columns, rows: preset.rows, columnWeights: resized.columnWeights, rowWeights: resized.rowWeights };
+  });
+  const applyLayoutDraft = (toAll = false) => {
+    const apply = (label) => setContentGridProportions(resizeContentGrid(label, layoutDraft.columns, layoutDraft.rows), layoutDraft.columnWeights, layoutDraft.rowWeights);
+    commitState((current) => ({ ...current, cells: toAll ? current.cells.map(apply) : patchSelectedCells(current.cells, selection, (label) => apply(label)) }));
+    const coordinateStillExists = activeCoordinate.row < layoutDraft.rows && activeCoordinate.column < layoutDraft.columns;
+    setLayoutCell(coordinateStillExists ? activeCoordinate.row * layoutDraft.columns + activeCoordinate.column : 0);
+    setLayoutDraft(null);
+  };
+  const boundarySlider = (label, axis, weights, vertical = false) => weights.length > 1 && h('div', { className: `proportion-axis-control ${vertical ? 'vertical' : 'horizontal'}` }, h('span', { className: 'proportion-axis-label' }, label), h(Slider, { range: { draggableTrack: false }, vertical, reverse: vertical, min: 0, max: 100, value: trackWeightsToBoundaries(weights), onChange: (boundaries) => updateBoundaries(axis, boundaries), ariaLabelForHandle: trackWeightsToBoundaries(weights).map((_, index) => `${label} boundary ${index + 1}`), tooltip: { formatter: (value) => `${Math.round(value)}%` } }));
+  const layoutEditor = h(Modal, { open: !!layoutDraft, title: 'Label layout', onCancel: () => setLayoutDraft(null), className: 'layout-editor-modal', destroyOnHidden: true, footer: layoutDraft && h(Flex, { className: 'layout-editor-footer', justify: 'space-between', gap: 8 }, h(Button, { className: 'layout-copy-all', onClick: () => applyLayoutDraft(true) }, 'Copy layout to all labels'), h(Space, { className: 'layout-editor-footer-actions' }, h(Button, { onClick: () => setLayoutDraft(null) }, 'Cancel'), h(Button, { type: 'primary', onClick: () => applyLayoutDraft(false) }, 'Apply layout'))) }, layoutDraft && h(React.Fragment, null,
+    h(Form.Item, { label: 'Grid' }, h(Select, { key: `${layoutDraft.columns}x${layoutDraft.rows}`, className: 'layout-preset-select', value: `${layoutDraft.columns}x${layoutDraft.rows}`, onChange: updateLayoutPreset, 'aria-label': 'Label grid preset', options: layoutPresets.map((preset) => ({ ...preset, label: `${preset.columns} × ${preset.rows}` })), optionRender: (option) => layoutPresetLabel(option.data), labelRender: ({ value }) => layoutPresetLabel(layoutPresets.find((preset) => preset.value === value) || layoutPresets[0]), style: { width: '100%' } })),
+    h('div', { className: `proportion-stage ${layoutDraft.rowWeights.length > 1 ? 'has-row-slider' : ''}` },
+      h('div', { className: 'proportion-preview', style: { gridTemplateColumns: layoutDraft.columnWeights.map((weight) => `${weight}fr`).join(' '), gridTemplateRows: layoutDraft.rowWeights.map((weight) => `${weight}fr`).join(' '), aspectRatio: `${state.labelWidth} / ${state.labelHeight}` } }, Array.from({ length: layoutDraft.columns * layoutDraft.rows }, (_, index) => h('span', { key: index }, `${Math.floor(index / layoutDraft.columns) + 1},${index % layoutDraft.columns + 1}`))),
+      boundarySlider('Rows', 'rowWeights', layoutDraft.rowWeights, true),
+      boundarySlider('Columns', 'columnWeights', layoutDraft.columnWeights),
+    ),
+    h(Button, { onClick: () => setLayoutDraft((draft) => ({ ...draft, columnWeights: equalWeights(draft.columns), rowWeights: equalWeights(draft.rows) })) }, 'Equalize proportions'),
+  ));
+  const activeCellSelector = h('section', { className: 'active-cell-selector', 'aria-label': 'Active content cell' },
+    h('div', { className: 'layout-cell-heading' }, h('span', null, 'Active cell'), h('strong', null, `[${activeCoordinate.row + 1},${activeCoordinate.column + 1}]`)),
+    h('div', { className: 'layout-cell-map' }, h(Radio.Group, { className: 'layout-cell-picker', value: activeContentIndex, onChange: (event) => setLayoutCell(event.target.value), 'aria-label': 'Active label cell', style: { '--layout-columns': activeLayout.columns, '--layout-rows': activeLayout.rows } }, Array.from({ length: activeLayout.columns * activeLayout.rows }, (_, index) => { const coordinate = contentCellCoordinate(activeLayout, index); return h(Radio.Button, { key: index, value: index, 'aria-label': `Cell ${coordinate.row + 1}, ${coordinate.column + 1}` }, `${coordinate.row + 1},${coordinate.column + 1}`); }))),
+  );
+  const textGroup = h('div', { className: 'editor-section-content' }, h(Form.Item, { label: 'Text' }, h(Input.TextArea, { value: activeContent.text, rows: 3, onChange: (e) => patchContent('text', e.target.value), 'data-cell': 'text' })));
   const alignmentIcons = { left: AlignLeftOutlined, center: AlignCenterOutlined, right: AlignRightOutlined };
-  const styleGroup = h('div', { className: 'editor-section-content' }, h(Flex, { gap: 8, align: 'center' }, h('div', { style: { flex: 1 } }, number('Size', 'fontSize', 6, 72)), h(IconButton, { title: 'Bold text', active: cell.weight === '700', 'data-toggle-weight': true, onClick: () => patch('weight', cell.weight === '700' ? '400' : '700', true) }, h('b', null, 'B')), ...['left', 'center', 'right'].map((align) => h(IconButton, { key: align, title: `Align ${align}`, active: cell.align === align, 'data-align': align, onClick: () => patch('align', align, true) }, h(alignmentIcons[align])))), h(Flex, { gap: 8 }, h('div', { style: { flex: 1 } }, h(Form.Item, { label: 'Vertical' }, h(Select, { value: cell.valign, onChange: (value) => patch('valign', value), 'data-cell': 'valign', options: ['top', 'middle', 'bottom'].map((value) => ({ value })) }))), color('Text color', 'color')));
+  const verticalAlignmentIcons = { top: VerticalAlignTopOutlined, middle: VerticalAlignMiddleOutlined, bottom: VerticalAlignBottomOutlined };
+  const compactControl = (label, control, className = '') => h('div', { className: `compact-style-control ${className}` }, h('span', { className: 'compact-style-label' }, label), control);
+  const textStyleOptions = [
+    { value: 'normal', title: 'Regular text', content: h('span', { className: 'text-style-glyph' }, 'A') },
+    { value: 'bold', title: 'Bold text', content: h('b', { className: 'text-style-glyph' }, 'B') },
+    { value: 'italic', title: 'Cursive / italic text', content: h('i', { className: 'text-style-glyph' }, 'I') },
+    { value: 'underline', title: 'Underline text', content: h('u', { className: 'text-style-glyph' }, 'U') },
+  ];
+  const styleGroup = h('div', { className: 'editor-section-content' },
+    h(Flex, { gap: 8, align: 'start', className: 'font-size-row' }, h('div', { className: 'font-control' }, h(Form.Item, { label: 'Font' }, h(Select, { value: activeContent.fontFamily, onChange: (value) => patchContent('fontFamily', value), 'data-cell': 'fontFamily', options: FONT_OPTIONS.map(({ value, label, family }) => ({ value, label: h('span', { style: { fontFamily: family } }, label) })), style: { width: '100%' } }))), h('div', { className: 'font-size-control' }, number('Size', 'fontSize', 6, 72))),
+    h(Flex, { gap: 8, align: 'end', justify: 'space-between', className: 'style-control-row' },
+      compactControl('Text style', h(IconRadioGroup, { value: activeContent.textStyle, onChange: (textStyle) => patchContentValues({ textStyle, weight: textStyle === 'bold' ? '700' : '400' }), label: 'Text style', className: 'text-style-controls', options: textStyleOptions.map((option) => ({ ...option, props: { 'data-text-style': option.value } })) })),
+      compactControl('Text color', h(ColorPicker, { value: activeContent.color, onChange: (value) => patchContent('color', colorValue(value)), 'data-cell': 'color', showText: true }), 'text-color-control'),
+    ),
+    h(Flex, { gap: 8, align: 'end', justify: 'space-between', className: 'alignment-control-row' },
+      compactControl('Horizontal', h(IconRadioGroup, { value: activeContent.align, onChange: (align) => patchContent('align', align), label: 'Horizontal alignment', className: 'alignment-controls', options: ['left', 'center', 'right'].map((align) => ({ value: align, title: `Align ${align}`, props: { 'data-align': align }, content: h(alignmentIcons[align]) })) })),
+      compactControl('Vertical', h(IconRadioGroup, { value: activeContent.valign, onChange: (valign) => patchContent('valign', valign), label: 'Vertical alignment', className: 'vertical-alignment-controls', options: ['top', 'middle', 'bottom'].map((valign) => ({ value: valign, title: `Align ${valign}`, props: { 'data-valign': valign }, content: h(verticalAlignmentIcons[valign]) })) })),
+    ),
+  );
   const uploader = h(Upload, { accept: 'image/*', showUploadList: false, beforeUpload: (file) => { const reader = new FileReader(); reader.onload = () => { const image = new Image(); image.onload = () => { patchSelected(() => ({ appearanceMode: 'image', image: reader.result, imageWidth: image.naturalWidth, imageHeight: image.naturalHeight, imageZoom: 1, imageX: 0, imageY: 0 })); setUi({ crop: true }); }; image.src = reader.result; }; reader.readAsDataURL(file); return false; } }, h(Button, { id: 'image-input' }, cell.image ? 'Replace background image' : 'Choose background image'));
   const appearanceIcons = { solid: BgColorsOutlined, pattern: BlockOutlined, image: FileImageOutlined };
-  const appearanceChildren = [h(Radio.Group, { key: 'mode', value: cell.appearanceMode, onChange: (e) => modeChange(e.target.value), 'aria-label': 'Sticker background type' }, h(Space, { wrap: true }, ['solid', 'pattern', 'image'].map((mode) => h(Radio.Button, { value: mode, key: mode }, h(appearanceIcons[mode]), h('span', null, mode[0].toUpperCase() + mode.slice(1)))))), cell.appearanceMode !== 'image' ? color('Background color', 'background') : null, cell.appearanceMode === 'pattern' ? h(Form.Item, { label: 'Pattern', key: 'pattern' }, h(Select, { value: cell.pattern, onChange: (value) => patch('pattern', value), 'data-cell': 'pattern', options: ['dots', 'stripes'].map((value) => ({ value })) })) : null, cell.appearanceMode === 'image' ? h(Space, { direction: 'vertical', key: 'upload' }, uploader, cell.image && h(Space, null, h(Button, { id: 'position-image', onClick: () => setUi({ crop: true }) }, 'Position image'), h(Button, { id: 'remove-image', danger: true, onClick: () => { patchSelected(() => ({ appearanceMode: 'solid', image: '', imageWidth: 0, imageHeight: 0 })); requestRender(); } }, 'Remove image'))) : null, number('Print-safe border (mm)', 'safeInset', 0, 20, .5)];
-  const heading = h(React.Fragment, null, h('div', { className: 'section-heading' }, h('h2', null, `Label ${selected + 1}`), h('span', null, `${selection.length} selected · of ${state.cells.length}`)), h('p', { className: 'selection-summary' }, `Editing ${selection.length === 1 ? 'label' : 'labels'} ${selection.map((index) => index + 1).join(', ')}`), h(Flex, { className: 'label-editor-actions', align: 'center', gap: 6 }, rotationControls, h(IconButton, { id: 'clear-label', className: 'clear-label', title: `Clear ${selection.length === 1 ? 'label' : `${selection.length} labels`}`, onClick: () => selection.some((index) => hasLabelContent(state.cells[index])) ? setUi({ confirm: 'clear' }) : (state.cells = resetSelectedCells(state.cells, selection), persist(), requestRender()) }, '×')));
+  const printBorderStyles = [{ value: 'solid', label: 'Solid' }, { value: 'dashed', label: 'Dashed' }, { value: 'dotted', label: 'Dotted' }];
+  const printableBorderControls = h('div', { className: 'printable-border-controls' },
+    h(Flex, { className: 'printable-border-toggle', align: 'center', justify: 'space-between' }, h('span', null, 'Printable border'), h(Switch, { size: 'small', className: 'printable-border-switch', checked: cell.printBorderEnabled, onChange: (checked) => patchLabel('printBorderEnabled', checked), 'aria-label': 'Printable border' })),
+    cell.printBorderEnabled && h(React.Fragment, null,
+      h(Form.Item, { label: 'Border type', className: 'printable-border-type' }, h(Radio.Group, { className: 'segmented-radio-group segmented-text-group border-style-options', value: cell.printBorderStyle, onChange: (event) => patchLabel('printBorderStyle', event.target.value), 'aria-label': 'Printable border type' }, printBorderStyles.map(({ value, label }) => h(Radio.Button, { value, key: value }, h('span', { className: `border-style-swatch ${value}`, 'aria-hidden': true }), h('span', null, label))))),
+      h(Flex, { gap: 8, className: 'printable-border-settings' }, h('div', { style: { flex: 1, minWidth: 0 } }, color('Border color', 'printBorderColor', cell, patchLabel)), h('div', { className: 'printable-border-width' }, h(Form.Item, { label: 'Border width' }, h(MillimeterInput, { value: cell.printBorderWidth, min: .1, max: Math.min(10, Math.min(state.labelWidth, state.labelHeight) / 2), step: .1, onChange: (value) => patchLabel('printBorderWidth', value), 'data-cell': 'printBorderWidth' })) )),
+    ),
+  );
+  const appearanceChildren = [h(Radio.Group, { key: 'mode', className: 'segmented-radio-group segmented-text-group appearance-mode', value: cell.appearanceMode, onChange: (e) => modeChange(e.target.value), 'aria-label': 'Sticker background type' }, ['solid', 'pattern', 'image'].map((mode) => h(Radio.Button, { value: mode, key: mode }, h(appearanceIcons[mode]), h('span', null, mode[0].toUpperCase() + mode.slice(1))))), cell.appearanceMode !== 'image' ? color('Background color', 'background', cell, patchLabel) : null, cell.appearanceMode === 'pattern' ? h(Form.Item, { label: 'Pattern', key: 'pattern' }, h(Select, { value: cell.pattern, onChange: (value) => patchLabel('pattern', value), 'data-cell': 'pattern', options: ['dots', 'stripes'].map((value) => ({ value })) })) : null, cell.appearanceMode === 'image' ? h(Space, { direction: 'vertical', key: 'upload' }, uploader, cell.image && h(Space, null, h(Button, { id: 'position-image', onClick: () => setUi({ crop: true }) }, 'Position image'), h(Button, { id: 'remove-image', danger: true, onClick: () => { patchSelected(() => ({ appearanceMode: 'solid', image: '', imageWidth: 0, imageHeight: 0 })); requestRender(); } }, 'Remove image'))) : null, h(Form.Item, { label: 'Print-safe border' }, h(MillimeterInput, { value: cell.safeInset, min: 0, max: 20, step: .5, onChange: (value) => patchLabel('safeInset', value), 'data-cell': 'safeInset' })), printableBorderControls];
+  const clearSelected = () => commitState((current) => ({ ...current, cells: resetSelectedCells(current.cells, selection) }));
+  const heading = h(React.Fragment, null, h('div', { className: 'section-heading' }, h('h2', null, `Label ${selected + 1}`), h('span', null, `${selection.length} selected · of ${state.cells.length}`)), h('p', { className: 'selection-summary' }, `Editing ${selection.length === 1 ? 'label' : 'labels'} ${selection.map((index) => index + 1).join(', ')}`), h(Flex, { className: 'label-editor-actions', align: 'center', gap: 6 }, rotationControls, h(Button, { className: 'layout-editor-button', icon: h(AppstoreOutlined), onClick: openLayoutEditor }, `Layout ${activeLayout.columns}×${activeLayout.rows}`), h(IconButton, { id: 'clear-label', className: 'clear-label', title: `Clear ${selection.length === 1 ? 'label' : `${selection.length} labels`}`, onClick: () => selection.some((index) => hasLabelContent(state.cells[index])) ? setUi({ confirm: 'clear' }) : clearSelected() }, '×')));
+  const copyEntireLabelAction = h(Button, { block: true, className: 'copy-entire-label', icon: h(CopyOutlined), onClick: () => { const source = state.cells[selected]; commitState((current) => ({ ...current, cells: current.cells.map((_, index) => index === selected ? source : copyEntireLabel(source)) })); message.success(`Copied label ${selected + 1} to all labels.`); } }, 'Copy entire label to all');
   const appearanceGroup = h('div', { className: 'editor-section-content' }, ...appearanceChildren);
-  const panelLabel = (label, group) => h('span', { className: 'editor-panel-label' }, h('span', null, label), h(CopyButton, { group }));
-  const sections = [{ key: 'text', label: panelLabel('Text', 'text'), children: textGroup }, { key: 'style', label: panelLabel('Style', 'style'), children: styleGroup }, { key: 'appearance', label: panelLabel('Appearance', 'appearance'), children: appearanceGroup }];
-  return h(Form, { layout: 'vertical', className: `label-editor-form ${compact ? 'compact-label-form' : ''}` }, heading, h(Collapse, { className: 'editor-sections', size: 'small', defaultActiveKey: compact ? ['text'] : ['text', 'style', 'appearance'], items: sections }));
+  const panelLabel = (label, group, showCell = false) => h('span', { className: 'editor-panel-label' }, h('span', null, label, showCell && h('small', { className: 'editor-cell-context' }, `[${activeCoordinate.row + 1},${activeCoordinate.column + 1}]`)), h(CopyButton, { group, contentIndex: activeContentIndex }));
+  const sections = [{ key: 'text', label: panelLabel('Text', 'text', true), children: textGroup }, { key: 'style', label: panelLabel('Style', 'style', true), children: styleGroup }, { key: 'appearance', label: panelLabel('Appearance', 'appearance'), children: appearanceGroup }];
+  return h(Form, { layout: 'vertical', className: `label-editor-form ${compact ? 'compact-label-form' : ''}` }, heading, copyEntireLabelAction, activeCellSelector, layoutEditor, h(Collapse, { className: 'editor-sections', size: 'small', defaultActiveKey: compact ? ['text'] : ['text', 'style', 'appearance'], items: sections }));
 }
 
 function focusSheetPreview() {
@@ -120,15 +248,17 @@ function focusSheetPreview() {
 }
 function FocusedLabelPreview() {
   const [pageW, pageH] = pageSize(state); const layout = getLabelLayout(state);
+  const column = selected % state.columns; const row = Math.floor(selected / state.columns);
+  const x = layout.x + column * (layout.cellWidth + layout.gapX); const y = layout.y + row * (layout.cellHeight + layout.gapY);
   return h('section', { className: 'focused-label-preview', 'aria-label': `Selected label ${selected + 1} preview` },
-    h('div', { className: 'focused-label-canvas', style: { aspectRatio: `${layout.cellWidth} / ${layout.cellHeight}` }, dangerouslySetInnerHTML: { __html: previewLabel(state.cells[selected], selected, layout, pageW, pageH) } }),
+    h('div', { className: `focused-label-canvas ${previewGuides ? '' : 'preview-guides-hidden'}`, style: { aspectRatio: `${layout.cellWidth} / ${layout.cellHeight}`, '--focused-radius-x': `${state.cornerRadius / layout.cellWidth * 100}%`, '--focused-radius-y': `${state.cornerRadius / layout.cellHeight * 100}%` } }, h('div', { className: 'focused-label-artwork', style: { width: `${pageW / layout.cellWidth * 100}%`, height: `${pageH / layout.cellHeight * 100}%`, left: `${-x / layout.cellWidth * 100}%`, top: `${-y / layout.cellHeight * 100}%` }, dangerouslySetInnerHTML: { __html: getSvg(state) } }), previewGuides && h(GridGuides, { item: state.cells[selected] }), previewGuides && h('span', { className: 'focused-label-cutout', 'aria-hidden': true })),
   );
 }
 function MobileWorkflow() {
   return h('section', { className: 'mobile-workflow', 'aria-label': 'Mobile designer workflow' },
     h(Flex, { gap: 8 },
       h(Button, { block: true, onClick: () => setUi({ sheetSetup: true }) }, 'Sheet setup'),
-      h(Button, { block: true, type: 'primary', onClick: () => setUi({ labelEditor: true }) }, `Edit label ${selected + 1}`),
+      h(Button, { block: true, type: 'primary', onClick: () => setUi({ labelEditor: true }) }, 'Label editor'),
     ),
   );
 }
@@ -147,18 +277,60 @@ function CropModal() {
   const dragStart = (event) => { drag.current = { x: event.clientX, y: event.clientY, crop }; event.currentTarget.setPointerCapture?.(event.pointerId); };
   const dragMove = (event) => { if (!drag.current) return; const dx = (event.clientX - drag.current.x) / 2; const dy = (event.clientY - drag.current.y) / 2; const delta = cropScreenDeltaToLocal({ rotation: drag.current.crop.rotation }, dx, dy); setCrop({ ...drag.current.crop, imageX: clampCrop(drag.current.crop.imageX - delta.x), imageY: clampCrop(drag.current.crop.imageY - delta.y) }); };
   const dimensions = contentDimensions(cell, state.labelWidth, state.labelHeight);
-  return h(Modal, { open: ui.crop, title: 'Position background image', onCancel: () => setUi({ crop: false }), onOk: () => { patchSelected(() => crop); setUi({ crop: false }); }, okText: 'Apply position', cancelText: 'Cancel', id: 'image-dialog' }, h('p', { className: 'crop-instructions' }, 'Drag to position. Scroll to zoom.'), h('div', { id: 'crop-preview', className: 'crop-preview', 'aria-label': 'Drag image to set its position; scroll to zoom', onPointerDown: dragStart, onPointerMove: dragMove, onPointerUp: () => { drag.current = null; }, onWheel: (event) => { event.preventDefault(); zoomCrop(event.deltaY); }, style: { '--crop-ratio': `${dimensions.width} / ${dimensions.height}`, backgroundImage: `url('${cell.image}')`, backgroundSize: `${crop.imageZoom * 100}%`, backgroundPosition: `${50 + crop.imageX / 2}% ${50 + crop.imageY / 2}%` } }), h(Space, null, [0, 270].map((rotation) => h(IconButton, { key: rotation, title: `${rotation} degree rotation`, active: crop.rotation === rotation, 'data-crop-rotation': rotation, onClick: () => setCrop({ ...crop, rotation }) }, rotation ? '↻' : '↔'))), h(Collapse, { size: 'small', className: 'crop-fine-tune', items: [{ key: 'fine-tune', label: 'Fine tune numerically', children: [['Zoom', 'imageZoom', 1, 4, .05, 'crop-zoom'], ['Horizontal position', 'imageX', -100, 100, 1, 'crop-x'], ['Vertical position', 'imageY', -100, 100, 1, 'crop-y']].map(([label, key, min, max, step, id]) => h(Form.Item, { label, key }, h(InputNumber, { id, min, max, step, value: crop[key], 'aria-label': label, onChange: (value) => setCrop({ ...crop, [key]: value ?? crop[key] }), style: { width: '100%' } }))) }] }));
+  const flowControls = h('div', { className: 'crop-content-flow' }, h('span', { className: 'crop-content-flow-label' }, 'Content flow'), h(IconRadioGroup, { value: crop.rotation, onChange: (rotation) => setCrop({ ...crop, rotation }), label: 'Image content flow', className: 'content-flow-switch', options: [0, 270].map((rotation) => ({ value: rotation, title: rotation ? 'Vertical content flow' : 'Horizontal content flow', props: { 'data-crop-rotation': rotation }, content: h(rotation ? ColumnHeightOutlined : ColumnWidthOutlined) })) }));
+  return h(Modal, { open: ui.crop, title: 'Position background image', onCancel: () => setUi({ crop: false }), onOk: () => { patchSelected(() => crop); setUi({ crop: false }); }, okText: 'Apply position', cancelText: 'Cancel', id: 'image-dialog' }, h('p', { className: 'crop-instructions' }, 'Drag to position. Scroll to zoom.'), h('div', { id: 'crop-preview', className: 'crop-preview', 'aria-label': 'Drag image to set its position; scroll to zoom', onPointerDown: dragStart, onPointerMove: dragMove, onPointerUp: () => { drag.current = null; }, onWheel: (event) => { event.preventDefault(); zoomCrop(event.deltaY); }, style: { '--crop-ratio': `${dimensions.width} / ${dimensions.height}`, backgroundImage: `url('${cell.image}')`, backgroundSize: `${crop.imageZoom * 100}%`, backgroundPosition: `${50 + crop.imageX / 2}% ${50 + crop.imageY / 2}%` } }), flowControls, h(Collapse, { size: 'small', className: 'crop-fine-tune', items: [{ key: 'fine-tune', label: 'Fine tune numerically', children: [['Zoom', 'imageZoom', 1, 4, .05, 'crop-zoom'], ['Horizontal position', 'imageX', -100, 100, 1, 'crop-x'], ['Vertical position', 'imageY', -100, 100, 1, 'crop-y']].map(([label, key, min, max, step, id]) => h(Form.Item, { label, key }, h(InputNumber, { id, min, max, step, value: crop[key], 'aria-label': label, onChange: (value) => setCrop({ ...crop, [key]: value ?? crop[key] }), style: { width: '100%' } }))) }] }));
 }
-function ExportModal() { const run = async (kind) => { if (kind === 'svg') download(`${safeName()}.svg`, new Blob([getSvg(state)], { type: 'image/svg+xml' })); if (kind === 'json') download(`${safeName()}.json`, new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' })); if (kind === 'pdf') await exportPdf(); setUi({ export: false }); }; const preview = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(getSvg(state))}`; return h(Modal, { open: ui.export, title: 'Export sheet', footer: null, onCancel: () => setUi({ export: false }), id: 'export-dialog' }, h('p', null, 'Choose a format for the current prepared sheet.'), h('div', { className: 'export-preview', 'aria-label': 'Print preview without guides' }, h('img', { src: preview, alt: 'White print preview of the sticker sheet' })), h(Flex, { className: 'export-actions', gap: 10, wrap: true }, ['svg', 'pdf', 'json'].map((kind) => h(Button, { key: kind, className: 'export-action', 'data-export': kind, onClick: () => run(kind) }, kind === 'json' ? 'Template JSON' : kind.toUpperCase())), h(Button, { id: 'print-sheet', className: 'export-action', onClick: () => { printSheet(); setUi({ export: false }); } }, 'Print')), h(Button, { id: 'template-workflow', block: true, onClick: () => setUi({ export: false, templates: true }) }, 'Template library…'));
+function ExportModal() {
+  const run = async (kind) => {
+    if (kind === 'svg') download(`${safeName()}.svg`, new Blob([getSvg(state)], { type: 'image/svg+xml' }));
+    if (kind === 'json') download(`${safeName()}.json`, new Blob([serializeTemplate(state)], { type: 'application/json' }));
+    if (kind === 'pdf') await exportPdf();
+    setUi({ export: false });
+  };
+  const preview = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(getSvg(state))}`;
+  return h(Modal, { open: ui.export, title: 'Export sheet', footer: null, onCancel: () => setUi({ export: false }), id: 'export-dialog' }, h('p', null, 'Choose a format for the current prepared sheet.'), h('div', { className: 'export-preview', 'aria-label': 'Print preview without guides' }, h('img', { src: preview, alt: 'White print preview of the sticker sheet' })), h(Flex, { className: 'export-actions', gap: 10, wrap: true }, ['svg', 'pdf', 'json'].map((kind) => h(Button, { key: kind, className: 'export-action', 'data-export': kind, onClick: () => run(kind) }, kind === 'json' ? `Template JSON · v${TEMPLATE_VERSION}` : kind.toUpperCase())), h(Button, { id: 'print-sheet', className: 'export-action', onClick: () => { printSheet(); setUi({ export: false }); } }, 'Print')), h(Button, { id: 'template-workflow', block: true, onClick: () => setUi({ export: false, templates: true }) }, 'Template library…'));
 }
-function ImportModal() { return h(Modal, { open: ui.import, title: 'Import', footer: null, onCancel: () => setUi({ import: false }), id: 'import-dialog' }, h(Upload, { accept: 'application/json,.json', showUploadList: false, beforeUpload: (file) => { const reader = new FileReader(); reader.onload = () => { try { state = normalizeSheet(JSON.parse(reader.result), { rejectInvalidGeometry: true }); selected = 0; selection = [0]; persist(); setUi({ import: false }); } catch { message.error('This file is not a valid Sticker Sheet Studio template.'); } }; reader.readAsText(file); return false; } }, h(Button, { id: 'import-template' }, 'Choose template JSON')), h('p', null, 'Imports stay on this device.'));
+function ImportModal() {
+  const importFile = (file) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const imported = parseTemplateJson(reader.result); commitState(() => imported); selected = 0; selection = [0]; setUi({ import: false });
+        message.success(`Imported template v${state.version}.`);
+      } catch (error) {
+        message.error(error instanceof TemplateVersionError ? `Template v${error.version} requires a newer Sticker Sheet Studio.` : 'This file is not a valid Sticker Sheet Studio template.');
+      }
+    };
+    reader.readAsText(file);
+    return false;
+  };
+  return h(Modal, { open: ui.import, title: 'Import', footer: null, onCancel: () => setUi({ import: false }), id: 'import-dialog' }, h(Upload, { accept: 'application/json,.json', showUploadList: false, beforeUpload: importFile }, h(Button, { id: 'import-template' }, 'Choose template JSON')), h('p', null, `Supports template versions up to v${TEMPLATE_VERSION}. Older templates are upgraded during import; imports stay on this device.`));
 }
 function TemplatesModal() {
   const templates = savedTemplates();
-  const list = templates.length ? templates.map((template, index) => h(Flex, { className: 'template', key: `${template.name}-${index}`, justify: 'space-between' }, h('div', null, h('strong', null, template.name), h('small', null, `${template.columns} × ${template.rows} · ${template.format}`)), h(Space, null, h(Button, { 'data-template-load': index, onClick: () => { state = normalizeSheet(template); selected = 0; selection = [0]; persist(); setUi({ templates: false }); } }, 'Use'), h(Button, { danger: true, 'data-template-delete': index, onClick: () => { templates.splice(index, 1); localStorage.setItem('sticker-sheet-studio.templates.v1', JSON.stringify(templates)); requestRender(); } }, 'Delete')))) : h('p', { className: 'empty' }, 'No templates saved yet.');
-  return h(Modal, { open: ui.templates, title: 'Template library', footer: null, onCancel: () => setUi({ templates: false }), id: 'templates' }, h(Button, { id: 'save-template', onClick: () => setUi({ confirm: 'saveTemplate' }) }, 'Save current sheet as template'), h('div', { id: 'template-list' }, list));
+  const list = templates.length ? templates.map((template, index) => {
+    const compatibility = templateCompatibility(template);
+    const versionLabel = compatibility.kind === 'invalid' ? 'Invalid' : compatibility.kind === 'legacy' && template.version === undefined ? 'Legacy' : `v${compatibility.version}`;
+    return h(Flex, { className: 'template', key: `${template.name}-${index}`, justify: 'space-between' }, h('div', null, h('strong', null, template.name), h('small', null, `${template.columns} × ${template.rows} · ${template.format} · ${versionLabel}${compatibility.compatible ? '' : ' · newer app required'}`)), h(Space, null, h(Button, { disabled: !compatibility.compatible, 'data-template-load': index, onClick: () => { try { const loaded = normalizeSheet(template); commitState(() => loaded); selected = 0; selection = [0]; setUi({ templates: false }); } catch (error) { message.error(error instanceof TemplateVersionError ? `Template v${error.version} requires a newer Sticker Sheet Studio.` : 'This local template is not compatible.'); } } }, 'Use'), h(Button, { danger: true, 'data-template-delete': index, onClick: () => { templates.splice(index, 1); localStorage.setItem('sticker-sheet-studio.templates.v1', JSON.stringify(templates)); requestRender(); } }, 'Delete')));
+  }) : h('p', { className: 'empty' }, 'No templates saved yet.');
+  return h(Modal, { open: ui.templates, title: 'Template library', footer: null, onCancel: () => setUi({ templates: false }), id: 'templates' }, h(Button, { id: 'save-template', onClick: () => setUi({ confirm: 'saveTemplate' }) }, `Save current sheet as v${TEMPLATE_VERSION} template`), h('div', { id: 'template-list' }, list));
 }
-function StickerDesigner() { const tabs = [{ key: 'sheet', label: 'Sheet setup', children: h(SheetForm) }, { key: 'label', label: 'Label editor', children: h(LabelForm) }]; const confirmation = ui.confirm === 'newSheet' ? 'Start a new sheet? This replaces the current local sheet.' : ui.confirm === 'saveTemplate' ? `Save “${state.name || 'Sticker sheet'}” as a local template?` : `Clear ${selection.length === 1 ? 'this label' : `${selection.length} selected labels`}? This removes their text, image, pattern, and formatting.`; return h(React.Fragment, null, h('main', null, h('aside', { className: 'sidebar', 'aria-label': 'Designer settings' }, h(Tabs, { className: 'tabs', type: 'card', activeKey: activeTab, onChange: (key) => { activeTab = key; requestRender(); }, items: tabs })), h('div', { className: 'mobile-designer' }, h(MobileWorkflow)), h(Preview)), h(MobileDesignDialogs), h(CropModal), h(ExportModal), h(ImportModal), h(TemplatesModal), h(Modal, { open: !!ui.confirm, title: ui.confirm === 'saveTemplate' ? 'Save template' : ui.confirm === 'newSheet' ? 'New sheet' : 'Clear labels', onCancel: () => setUi({ confirm: null }), onOk: () => { if (ui.confirm === 'newSheet') { state = defaultState(); selected = 0; selection = [0]; activeTab = 'sheet'; persist(); } if (ui.confirm === 'clear') { state.cells = resetSelectedCells(state.cells, selection); persist(); } if (ui.confirm === 'saveTemplate') { const name = state.name || 'Sticker sheet'; const templates = savedTemplates(); templates.push({ ...state, name }); localStorage.setItem('sticker-sheet-studio.templates.v1', JSON.stringify(templates)); setUi({ confirm: null, templates: true }); return; } setUi({ confirm: null }); } }, confirmation)); }
+function StickerDesigner() {
+  const tabs = [{ key: 'sheet', label: 'Sheet setup', children: h(SheetForm) }, { key: 'label', label: 'Label editor', children: h(LabelForm) }];
+  const confirmation = ui.confirm === 'newSheet' ? 'Start a new sheet? This replaces the current local sheet.' : ui.confirm === 'saveTemplate' ? `Save “${state.name || 'Sticker sheet'}” as a local template?` : `Clear ${selection.length === 1 ? 'this label' : `${selection.length} selected labels`}? This removes their text, image, pattern, and formatting.`;
+  const confirmAction = () => {
+    if (ui.confirm === 'newSheet') { commitState(() => defaultState()); selected = 0; selection = [0]; activeTab = 'sheet'; }
+    if (ui.confirm === 'clear') commitState((current) => ({ ...current, cells: resetSelectedCells(current.cells, selection) }));
+    if (ui.confirm === 'saveTemplate') {
+      const templates = savedTemplates();
+      templates.push(JSON.parse(serializeTemplate({ ...state, name: state.name || 'Sticker sheet' })));
+      localStorage.setItem('sticker-sheet-studio.templates.v1', JSON.stringify(templates));
+      setUi({ confirm: null, templates: true }); return;
+    }
+    setUi({ confirm: null });
+  };
+  return h(React.Fragment, null, h('main', null, h('aside', { className: 'sidebar', 'aria-label': 'Designer settings' }, h(Tabs, { className: 'tabs', type: 'card', activeKey: activeTab, onChange: (key) => { activeTab = key; requestRender(); }, items: tabs })), h('div', { className: 'mobile-designer' }, h(MobileWorkflow)), h(Preview)), h(MobileDesignDialogs), h(CropModal), h(ExportModal), h(ImportModal), h(TemplatesModal), h(Modal, { open: !!ui.confirm, title: ui.confirm === 'saveTemplate' ? 'Save template' : ui.confirm === 'newSheet' ? 'New sheet' : 'Clear labels', onCancel: () => setUi({ confirm: null }), onOk: confirmAction }, confirmation));
+}
 
 function loadState() { try { return normalizeSheet(JSON.parse(localStorage.getItem(STORAGE_KEY))); } catch { return defaultState(); } }
 function persist() { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
@@ -249,7 +421,28 @@ function legacyRender() {
     <dialog id="templates" aria-labelledby="templates-title"><form method="dialog"><div class="dialog-head"><h2 id="templates-title">Template library</h2><button aria-label="Close">×</button></div><button type="button" id="save-template" class="quiet">Save current sheet as template</button><div id="template-list">${templateList()}</div></form></dialog><div id="context-tooltip" class="context-tooltip" role="tooltip" hidden></div>`;
   wireEvents();
 }
-function previewLabel(item, index, layout, pageW, pageH) { const col = index % state.columns; const row = Math.floor(index / state.columns); const x = layout.x + col * (layout.cellWidth + layout.gapX); const y = layout.y + row * (layout.cellHeight + layout.gapY); const dimensions = contentDimensions(item, layout.cellWidth, layout.cellHeight); const crop = imageCropBox(item, 0, 0, dimensions.width, dimensions.height); const innerRadius = Math.max(0, state.cornerRadius - crop.inset); const image = item.appearanceMode === 'image' && item.image ? `<i class="label-image-wrap" aria-hidden="true" style="--image:url('${item.image}');--image-size:${crop.backgroundSize};--image-position:${crop.backgroundPosition}"></i>` : ''; const isSelected = selection.includes(index); return `<button class="label ${isSelected ? 'selected' : ''} ${index === selected ? 'primary-selection' : ''}" role="option" aria-selected="${isSelected}" aria-label="Label ${index + 1}${isSelected ? ', selected' : ''}" data-select="${index}" style="--left:${x / pageW * 100}%;--top:${y / pageH * 100}%;--width:${layout.cellWidth / pageW * 100}%;--height:${layout.cellHeight / pageH * 100}%;--safe:${crop.inset / dimensions.width * 100}%;--safe-y:${crop.inset / dimensions.height * 100}%;--radius-x:${state.cornerRadius / layout.cellWidth * 100}%;--radius-y:${state.cornerRadius / layout.cellHeight * 100}%;--inner-radius-x:${innerRadius / dimensions.width * 100}%;--inner-radius-y:${innerRadius / dimensions.height * 100}%;--bg:${item.background};--ink:${item.color};--size:${item.fontSize}px;--weight:${item.weight};--align:${item.align};--valign:${item.valign === 'top' ? 'flex-start' : item.valign === 'bottom' ? 'flex-end' : 'center'};" data-pattern="${item.appearanceMode === 'pattern' ? item.pattern : 'none'}" data-active-appearance-mode="${item.appearanceMode}"><span class="label-content" style="--rotation:${item.rotation}deg;--content-width:${dimensions.width / layout.cellWidth * 100}%;--content-height:${dimensions.height / layout.cellHeight * 100}%;">${image}<span class="label-text">${escapeHtml(item.text)}</span></span><span class="label-selection-overlay" aria-hidden="true"></span></button>`; }
+function gridGuidePositions(item) {
+  const cumulative = (weights) => { let position = 0; return weights.slice(0, -1).map((weight) => (position += weight) * 100); };
+  const equalWeights = (count) => Array.from({ length: count }, () => 1 / count);
+  return { columns: cumulative(item.contentGrid.columnWeights || equalWeights(item.contentGrid.columns)), rows: cumulative(item.contentGrid.rowWeights || equalWeights(item.contentGrid.rows)) };
+}
+function GridGuides({ item }) {
+  const guides = gridGuidePositions(item);
+  return h('span', { className: 'label-grid-guides', 'aria-hidden': true },
+    ...guides.columns.map((position, index) => h('i', { className: 'label-grid-guide vertical', key: `column-${index}`, style: { '--guide-position': `${position}%` } })),
+    ...guides.rows.map((position, index) => h('i', { className: 'label-grid-guide horizontal', key: `row-${index}`, style: { '--guide-position': `${position}%` } })),
+  );
+}
+function previewLabel(item, index, layout, pageW, pageH) {
+  const col = index % state.columns;
+  const row = Math.floor(index / state.columns);
+  const x = layout.x + col * (layout.cellWidth + layout.gapX);
+  const y = layout.y + row * (layout.cellHeight + layout.gapY);
+  const isSelected = selection.includes(index);
+  const guides = gridGuidePositions(item);
+  const guideMarkup = [...guides.columns.map((position) => `<i class="label-grid-guide vertical" style="--guide-position:${position}%"></i>`), ...guides.rows.map((position) => `<i class="label-grid-guide horizontal" style="--guide-position:${position}%"></i>`)].join('');
+  return `<button class="label ${isSelected ? 'selected' : ''} ${index === selected ? 'primary-selection' : ''}" role="option" aria-selected="${isSelected}" aria-label="Label ${index + 1}${isSelected ? ', selected' : ''}" data-select="${index}" style="--left:${x / pageW * 100}%;--top:${y / pageH * 100}%;--width:${layout.cellWidth / pageW * 100}%;--height:${layout.cellHeight / pageH * 100}%;--radius-x:${state.cornerRadius / layout.cellWidth * 100}%;--radius-y:${state.cornerRadius / layout.cellHeight * 100}%;"><span class="label-grid-guides" aria-hidden="true">${guideMarkup}</span><span class="label-selection-overlay" aria-hidden="true"></span></button>`;
+}
 function templateList() {
   const templates = savedTemplates();
   if (!templates.length) return '<p class="empty">No templates saved yet.</p>';
@@ -272,7 +465,7 @@ function applyPreviewCrop(button, cell) {
   }
 }
 function patchPreview() { selection.forEach((index) => { const button = app.querySelector(`[data-select="${index}"]`); const cell = state.cells[index]; if (!button) return; button.style.setProperty('--bg', cell.background); button.style.setProperty('--ink', cell.color); button.style.setProperty('--size', `${cell.fontSize}px`); button.style.setProperty('--weight', cell.weight); button.style.setProperty('--align', cell.align); button.style.setProperty('--valign', cell.valign === 'top' ? 'flex-start' : cell.valign === 'bottom' ? 'flex-end' : 'center'); button.dataset.pattern = cell.pattern; button.querySelector('.label-text').textContent = cell.text; applyPreviewCrop(button, cell); }); }
-function patchSelected(patch) { state.cells = patchSelectedCells(state.cells, selection, patch); persist(); }
+function patchSelected(patch, options = {}) { commitState((current) => ({ ...current, cells: patchSelectedCells(current.cells, selection, patch) }), options); }
 function selectLabel(index, toggle = false) {
   if (toggle) {
     selection = selection.includes(index) ? selection.filter((item) => item !== index) : [...selection, index];
@@ -547,3 +740,10 @@ function printSheet() {
 }
 if ('serviceWorker' in navigator) window.addEventListener('load', () => navigator.serviceWorker.register('./sw.js'));
 requestRender();
+window.addEventListener('keydown', (event) => {
+  const target = event.target;
+  const editable = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target?.isContentEditable;
+  if ((event.ctrlKey || event.metaKey) && !event.shiftKey && event.key.toLowerCase() === 'z' && !editable) {
+    event.preventDefault(); undoLastChange();
+  }
+});

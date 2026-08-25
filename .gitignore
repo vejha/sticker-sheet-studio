@@ -19,6 +19,10 @@ coverage/
 # Local agent-loop run ledgers (runtime-only, never commit)
 .agent-runs/
 
+# Local browser-review artifacts
+.playwright-mcp/
+.tmp/
+
 # Editor and OS files
 .vscode/
 .idea/
