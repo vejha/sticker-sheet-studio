@@ -5,8 +5,8 @@
   "orientation": "portrait",
   "marginX": 12,
   "marginY": 12,
-  "labelWidth": 62,
-  "labelHeight": 54.6,
+  "labelWidth": 60,
+  "labelHeight": 52,
   "cornerRadius": 4,
   "cells": [
     {

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { contentDimensions, copyAppearanceSettings, copyStyleSettings, copyTextSettings, cropLocalPointToScreen, cropScreenDeltaToLocal, defaultState, deriveGrid, emptyLabel, getLabelLayout, getSvg, hasLabelContent, imageCropBox, imageCropSourceRect, maxCornerRadius, MIN_SAFE_ARTWORK_SIZE, normalizeSelection, normalizeSheet, pageSize, patchSelectedCells, pdfExportGeometry, pdfRasterLabelGeometry, resetSelectedCells, safeArea, safeCornerRadius, SheetGeometryError } from '../src/model.js';
+import { contentDimensions, copyAppearanceSettings, copyContentAtCoordinate, copyContentLayout, copyEntireLabel, copyStyleSettings, copyTextSettings, cropLocalPointToScreen, cropScreenDeltaToLocal, defaultState, deriveGrid, emptyLabel, FONT_OPTIONS, getLabelLayout, getSvg, hasLabelContent, imageCropBox, imageCropSourceRect, maxCornerRadius, MIN_SAFE_ARTWORK_SIZE, normalizeSelection, normalizeSheet, normalizeTrackWeights, pageSize, parseTemplateJson, patchContentAtCoordinate, patchSelectedCells, pdfExportGeometry, pdfRasterLabelGeometry, resetSelectedCells, resizeContentGrid, safeArea, safeCornerRadius, serializeTemplate, setContentGridProportions, setTrackShare, SheetGeometryError, TEMPLATE_VERSION, TemplateVersionError, templateCompatibility, trackBoundariesToWeights, trackWeightsToBoundaries } from '../src/model.js';
 
 test('normalizes grid dimensions and supplies all needed cells', () => {
   const sheet = normalizeSheet({ columns: 2, rows: 3, cells: [{ text: 'First' }] });
@@ -101,6 +101,7 @@ test('keeps label guide borders out of SVG, PDF, and print export sources', () =
 
   assert.doesNotMatch(svg, /#c8c4bb/i);
   assert.doesNotMatch(svg, /stroke="#c8c4bb"/i);
+  assert.doesNotMatch(svg, /label-grid-guide/i);
   assert.match(svg, /fill="#123456"/i);
 });
 
@@ -242,6 +243,16 @@ test('converts editor CSS pixel text size to physical SVG units', () => {
   assert.doesNotMatch(svg, /font-size="[^\"]*mm"/);
 });
 
+test('normalizes and exports curated font families with broad category coverage', () => {
+  assert.equal(FONT_OPTIONS.length, 10);
+  assert.deepEqual(new Set(FONT_OPTIONS.map(({ category }) => category)), new Set(['sans', 'serif', 'mono', 'display', 'script']));
+  const sheet = normalizeSheet({ columns: 1, rows: 1, cells: [{ text: 'Typeset', fontFamily: 'Georgia' }] });
+  assert.equal(sheet.version, 12);
+  assert.equal(sheet.cells[0].fontFamily, 'Georgia');
+  assert.match(getSvg(sheet), /font-family="Georgia, &quot;Times New Roman&quot;, serif"/);
+  assert.equal(normalizeSheet({ cells: [{ fontFamily: 'Unknown Font' }] }).cells[0].fontFamily, 'Arial');
+});
+
 test('converts preview pattern tile sizes to SVG user units', () => {
   const svg = getSvg(defaultState());
   assert.match(svg, /pattern id="dots" width="1\.0583333333333333" height="1\.0583333333333333"/);
@@ -282,6 +293,23 @@ test('exports background images at full opacity with the safe crop clip retained
 
   assert.match(svg, /<image\b[^>]*clip-path="url\(#safe0\)"/);
   assert.doesNotMatch(svg, /<image\b[^>]*\bopacity=/);
+});
+
+test('exports an optional printable border fully inside the sticker edge', () => {
+  const disabled = normalizeSheet({ cells: [{ printBorderEnabled: false, printBorderColor: '#123456', printBorderWidth: 2 }] });
+  assert.doesNotMatch(getSvg(disabled), /stroke="#123456"/);
+
+  const enabled = normalizeSheet({ columns: 1, rows: 1, labelWidth: 60, labelHeight: 40, cornerRadius: 8, cells: [{ printBorderEnabled: true, printBorderColor: '#123456', printBorderWidth: 2 }] });
+  assert.match(getSvg(enabled), /<rect x="13" y="13" width="58" height="38" rx="7" fill="none" stroke="#123456" stroke-width="2"\/?>/);
+  assert.equal(enabled.cells[0].printBorderEnabled, true);
+  assert.equal(enabled.cells[0].printBorderStyle, 'solid');
+  const dashed = getSvg(normalizeSheet({ cells: [{ printBorderEnabled: true, printBorderWidth: 2, printBorderStyle: 'dashed' }] }));
+  assert.match(dashed, /stroke-dasharray="8 4"/);
+  const dotted = getSvg(normalizeSheet({ cells: [{ printBorderEnabled: true, printBorderWidth: 2, printBorderStyle: 'dotted' }] }));
+  assert.match(dotted, /stroke-dasharray="0 5" stroke-linecap="round"/);
+  assert.equal(normalizeSheet({ cells: [{ printBorderStyle: 'unknown' }] }).cells[0].printBorderStyle, 'solid');
+  assert.equal(normalizeSheet({ cells: [{ printBorderColor: 'invalid', printBorderWidth: 999 }] }).cells[0].printBorderColor, '#22332b');
+  assert.equal(normalizeSheet({ labelWidth: 20, labelHeight: 10, cells: [{ printBorderWidth: 999 }] }).cells[0].printBorderWidth, 5);
 });
 
 test('uses identical cover geometry for CSS previews and SVG/PDF crops across image ratios, zooms, and extreme pans', () => {
@@ -389,23 +417,194 @@ test('keeps local image crop geometry finite for zero, normal, high, and excessi
 });
 
 test('copies only the requested text or appearance fields', () => {
-  const source = { text: 'Copied', color: '#111111', fontSize: 22, weight: '700', align: 'left', valign: 'top', background: '#ffffff', pattern: 'dots', image: 'data:image/png;base64,x' };
-  const target = { text: 'Keep', color: '#222222', fontSize: 10, weight: '400', align: 'right', valign: 'bottom', background: '#000000', pattern: 'none', image: '' };
+  const source = { text: 'Copied', color: '#111111', fontFamily: 'Georgia', fontSize: 22, textStyle: 'italic', weight: '400', align: 'left', valign: 'top', background: '#ffffff', pattern: 'dots', image: 'data:image/png;base64,x', printBorderEnabled: true, printBorderColor: '#123456', printBorderWidth: 2, printBorderStyle: 'dashed' };
+  const target = { text: 'Keep', color: '#222222', fontFamily: 'Arial', fontSize: 10, textStyle: 'normal', weight: '400', align: 'right', valign: 'bottom', background: '#000000', pattern: 'none', image: '' };
   const textCopy = copyTextSettings(source, target);
   assert.equal(textCopy.text, 'Copied');
   assert.equal(textCopy.background, '#000000');
   const appearanceCopy = copyAppearanceSettings(source, target);
   assert.equal(appearanceCopy.background, '#ffffff');
+  assert.equal(appearanceCopy.printBorderEnabled, true);
+  assert.equal(appearanceCopy.printBorderColor, '#123456');
+  assert.equal(appearanceCopy.printBorderWidth, 2);
+  assert.equal(appearanceCopy.printBorderStyle, 'dashed');
   assert.equal(appearanceCopy.text, 'Keep');
   const styleCopy = copyStyleSettings(source, target);
+  assert.equal(styleCopy.fontFamily, 'Georgia');
   assert.equal(styleCopy.fontSize, 22);
+  assert.equal(styleCopy.textStyle, 'italic');
   assert.equal(styleCopy.rotation, undefined);
   assert.equal(styleCopy.text, 'Keep');
+});
+
+test('copies an entire label without sharing nested grid state', () => {
+  let source = resizeContentGrid(emptyLabel(), 3, 2);
+  source = setContentGridProportions(source, [.5, .3, .2], [.7, .3]);
+  source = { ...source, appearanceMode: 'image', image: 'data:image/png;base64,x', imageZoom: 2, printBorderEnabled: true, printBorderStyle: 'dotted' };
+  source.contentGrid.cells[4] = { ...source.contentGrid.cells[4], text: 'Deep copy', fontFamily: 'Georgia', textStyle: 'italic' };
+  const copied = copyEntireLabel(source);
+
+  assert.deepEqual(copied, source);
+  assert.notEqual(copied, source);
+  assert.notEqual(copied.contentGrid, source.contentGrid);
+  assert.notEqual(copied.contentGrid.columnWeights, source.contentGrid.columnWeights);
+  assert.notEqual(copied.contentGrid.rowWeights, source.contentGrid.rowWeights);
+  assert.notEqual(copied.contentGrid.cells, source.contentGrid.cells);
+  assert.notEqual(copied.contentGrid.cells[4], source.contentGrid.cells[4]);
+  copied.contentGrid.cells[4].text = 'Changed';
+  assert.equal(source.contentGrid.cells[4].text, 'Deep copy');
 });
 
 test('copies content rotation with style settings', () => {
   const copied = copyStyleSettings({ color: '#111111', fontSize: 22, weight: '700', align: 'left', valign: 'top', rotation: 270 }, { rotation: 0 });
   assert.equal(copied.rotation, 270);
+});
+
+test('migrates legacy weights and exports mutually exclusive text styles', () => {
+  const legacy = normalizeSheet({ cells: [{ text: 'Regular', weight: '400' }, { text: 'Bold', weight: '700' }] });
+  assert.equal(legacy.cells[0].contentGrid.cells[0].textStyle, 'normal');
+  assert.equal(legacy.cells[1].contentGrid.cells[0].textStyle, 'bold');
+
+  const label = resizeContentGrid(emptyLabel(), 2, 2);
+  label.contentGrid.cells = ['normal', 'bold', 'italic', 'underline'].map((textStyle) => ({ ...label.contentGrid.cells[0], text: textStyle, textStyle, weight: textStyle === 'bold' ? '700' : '400' }));
+  const svg = getSvg({ ...defaultState(), cells: [label] });
+  assert.match(svg, /<text[^>]*font-weight="400" font-style="normal" text-decoration="none"[^>]*>normal<\/text>/);
+  assert.match(svg, /<text[^>]*font-weight="700" font-style="normal" text-decoration="none"[^>]*>bold<\/text>/);
+  assert.match(svg, /<text[^>]*font-weight="400" font-style="italic" text-decoration="none"[^>]*>italic<\/text>/);
+  assert.match(svg, /<text[^>]*font-weight="400" font-style="normal" text-decoration="underline"[^>]*>underline<\/text>/);
+});
+
+test('migrates legacy labels to a 1x1 content grid', () => {
+  const cell = normalizeSheet({ cells: [{ text: 'Legacy', fontFamily: 'Georgia', rotation: 270 }] }).cells[0];
+  assert.deepEqual([cell.contentGrid.columns, cell.contentGrid.rows], [1, 1]);
+  assert.equal(cell.contentGrid.cells[0].text, 'Legacy');
+  assert.equal(cell.contentGrid.cells[0].fontFamily, 'Georgia');
+  assert.equal(cell.contentGrid.cells[0].rotation, 270);
+});
+
+test('resizes content grids by preserving the row and column intersection', () => {
+  let label = resizeContentGrid(emptyLabel(), 3, 2);
+  label.contentGrid.cells = label.contentGrid.cells.map((cell, index) => ({ ...cell, text: `cell-${index}` }));
+  label = resizeContentGrid(label, 2, 3);
+  assert.deepEqual(label.contentGrid.cells.map((cell) => cell.text), ['cell-0', 'cell-1', 'cell-3', 'cell-4', '', '']);
+  label = resizeContentGrid(label, 3, 3);
+  assert.deepEqual(label.contentGrid.cells.map((cell) => cell.text), ['cell-0', 'cell-1', '', 'cell-3', 'cell-4', '', '', '', '']);
+});
+
+test('copies and patches content at matching 2d coordinates only', () => {
+  const source = resizeContentGrid(emptyLabel(), 3, 3);
+  source.contentGrid.columnWeights = [.5, .3, .2];
+  source.contentGrid.rowWeights = [.2, .3, .5];
+  source.contentGrid.cells[4] = { ...source.contentGrid.cells[4], text: 'center', fontSize: 22 };
+  const wideTarget = resizeContentGrid(emptyLabel(), 3, 2);
+  const narrowTarget = resizeContentGrid(emptyLabel(), 1, 3);
+  const copiedWide = copyContentAtCoordinate(source, wideTarget, 4, copyTextSettings);
+  const copiedNarrow = copyContentAtCoordinate(source, narrowTarget, 4, copyTextSettings);
+  assert.equal(copiedWide.contentGrid.cells[4].text, 'center');
+  assert.deepEqual(copiedWide.contentGrid.columnWeights, wideTarget.contentGrid.columnWeights);
+  assert.deepEqual(copiedWide.contentGrid.rowWeights, wideTarget.contentGrid.rowWeights);
+  assert.deepEqual(copiedNarrow, narrowTarget);
+
+  const patched = patchContentAtCoordinate([source, wideTarget, narrowTarget], [0, 1, 2], 0, 4, () => ({ color: '#abcdef' }));
+  assert.equal(patched[0].contentGrid.cells[4].color, '#abcdef');
+  assert.deepEqual(patched[0].contentGrid.columnWeights, [.5, .3, .2]);
+  assert.deepEqual(patched[0].contentGrid.rowWeights, [.2, .3, .5]);
+  assert.equal(patched[1].contentGrid.cells[4].color, '#abcdef');
+  assert.equal(patched[2].contentGrid.cells.every((cell) => cell.color !== '#abcdef'), true);
+});
+
+test('renders every content-grid coordinate as an independently clipped SVG text group', () => {
+  const label = resizeContentGrid(emptyLabel(), 2, 2);
+  label.contentGrid.cells = label.contentGrid.cells.map((cell, index) => ({ ...cell, text: `grid-${index + 1}` }));
+  const svg = getSvg({ ...defaultState(), cells: [label] });
+  for (let index = 0; index < 4; index += 1) {
+    assert.match(svg, new RegExp(`<clipPath id="content0-${index}">`));
+    assert.match(svg, new RegExp(`>grid-${index + 1}<`));
+  }
+  assert.match(svg, /translate\(27 22\) rotate\(0\) translate\(-15 -10\)/);
+  assert.match(svg, /translate\(57 42\) rotate\(0\) translate\(-15 -10\)/);
+});
+
+test('normalizes grid proportions and redistributes slider shares to total one', () => {
+  assert.deepEqual(normalizeTrackWeights([2, 1], 2), [2 / 3, 1 / 3]);
+  assert.deepEqual(normalizeTrackWeights(undefined, 3), [1 / 3, 1 / 3, 1 / 3]);
+  const adjusted = setTrackShare([1 / 3, 1 / 3, 1 / 3], 0, 60);
+  assert.ok(Math.abs(adjusted[0] - .6) < 1e-10);
+  assert.ok(Math.abs(adjusted[1] - .2) < 1e-10);
+  assert.ok(Math.abs(adjusted[2] - .2) < 1e-10);
+  assert.ok(Math.abs(adjusted.reduce((sum, value) => sum + value, 0) - 1) < 1e-10);
+  let expanded = resizeContentGrid(emptyLabel(), 2, 1);
+  expanded = setContentGridProportions(expanded, [.7, .3], [1]);
+  expanded = resizeContentGrid(expanded, 3, 1);
+  assert.ok(expanded.contentGrid.columnWeights.every((weight, index) => Math.abs(weight - [7 / 15, 1 / 5, 1 / 3][index]) < 1e-10));
+});
+
+test('round-trips track weights through cumulative multi-handle boundaries', () => {
+  assert.deepEqual(trackWeightsToBoundaries([.2, .5, .3]), [20, 70]);
+  assert.deepEqual(trackBoundariesToWeights([20, 70], 3), [.2, .5, .3]);
+  assert.deepEqual(trackBoundariesToWeights([], 1), [1]);
+  assert.deepEqual(trackBoundariesToWeights([1, 99], 3), [.05, .9, .05]);
+});
+
+test('copies layout proportions while preserving target content by coordinate', () => {
+  let source = resizeContentGrid(emptyLabel(), 3, 2);
+  source = setContentGridProportions(source, [.6, .3, .1], [.75, .25]);
+  let target = resizeContentGrid(emptyLabel(), 2, 3);
+  target.contentGrid.cells[3] = { ...target.contentGrid.cells[3], text: 'target-2-2' };
+  const copied = copyContentLayout(source, target);
+  assert.deepEqual([copied.contentGrid.columns, copied.contentGrid.rows], [3, 2]);
+  assert.ok(copied.contentGrid.columnWeights.every((weight, index) => Math.abs(weight - [.6, .3, .1][index]) < 1e-10));
+  assert.ok(copied.contentGrid.rowWeights.every((weight, index) => Math.abs(weight - [.75, .25][index]) < 1e-10));
+  assert.equal(copied.contentGrid.cells[4].text, 'target-2-2');
+});
+
+test('uses custom proportions for canonical SVG content geometry', () => {
+  let label = resizeContentGrid(emptyLabel(), 2, 1);
+  label = setContentGridProportions(label, [.25, .75], [1]);
+  label.contentGrid.cells = label.contentGrid.cells.map((cell, index) => ({ ...cell, text: `weighted-${index}` }));
+  const svg = getSvg({ ...defaultState(), cells: [label] });
+  assert.match(svg, /id="content0-0"><rect x="0" y="0" width="15" height="40"/);
+  assert.match(svg, /translate\(19\.5 32\) rotate\(0\) translate\(-7\.5 -20\)/);
+  assert.match(svg, /id="content0-1"><rect x="0" y="0" width="45" height="40"/);
+  assert.match(svg, /translate\(49\.5 32\) rotate\(0\) translate\(-22\.5 -20\)/);
+});
+
+test('round-trips every current template feature through versioned JSON', () => {
+  let label = resizeContentGrid(emptyLabel(), 3, 2);
+  label = setContentGridProportions(label, [.5, .3, .2], [.65, .35]);
+  label = {
+    ...label,
+    appearanceMode: 'image', image: 'data:image/png;base64,fixture', imageWidth: 800, imageHeight: 600,
+    imageZoom: 2.25, imageX: 30, imageY: -40, safeInset: 3,
+    printBorderEnabled: true, printBorderColor: '#123456', printBorderWidth: 1.5, printBorderStyle: 'dashed',
+  };
+  label.contentGrid.cells = label.contentGrid.cells.map((cell, index) => ({
+    ...cell, text: `cell-${index}`, fontFamily: index % 2 ? 'Georgia' : 'Courier New', fontSize: 10 + index,
+    textStyle: ['normal', 'bold', 'italic', 'underline'][index % 4], weight: index % 4 === 1 ? '700' : '400',
+    align: ['left', 'center', 'right'][index % 3], valign: ['top', 'middle', 'bottom'][index % 3], rotation: index % 2 ? 270 : 0,
+  }));
+  const source = normalizeSheet({ ...defaultState(), name: 'Round trip', cells: [label] });
+  const json = serializeTemplate(source);
+  const raw = JSON.parse(json);
+  const parsed = parseTemplateJson(json);
+
+  assert.equal(raw.version, TEMPLATE_VERSION);
+  assert.deepEqual(parsed, source);
+  assert.deepEqual(parsed.cells[0].contentGrid.columnWeights, [.5, .3, .2]);
+  assert.equal(parsed.cells[0].contentGrid.cells[3].textStyle, 'underline');
+  assert.equal(parsed.cells[0].printBorderStyle, 'dashed');
+  assert.equal(parsed.cells[0].imageZoom, 2.25);
+});
+
+test('classifies template compatibility and rejects newer versions clearly', () => {
+  assert.deepEqual(templateCompatibility({ version: TEMPLATE_VERSION }), { compatible: true, kind: 'current', version: TEMPLATE_VERSION });
+  assert.deepEqual(templateCompatibility({ version: 6 }), { compatible: true, kind: 'legacy', version: 6 });
+  assert.deepEqual(templateCompatibility({ cells: [] }), { compatible: true, kind: 'legacy', version: 1 });
+  assert.deepEqual(templateCompatibility({}), { compatible: false, kind: 'invalid' });
+  assert.deepEqual(templateCompatibility({ version: TEMPLATE_VERSION + 1 }), { compatible: false, kind: 'future', version: TEMPLATE_VERSION + 1 });
+  assert.equal(templateCompatibility({ version: 'broken' }).compatible, false);
+  assert.throws(() => parseTemplateJson(JSON.stringify({ ...defaultState(), version: TEMPLATE_VERSION + 1 })), TemplateVersionError);
+  assert.throws(() => parseTemplateJson('[]'), TypeError);
 });
 
 test('normalizes multi-selection to unique in-range labels and retains a primary fallback', () => {

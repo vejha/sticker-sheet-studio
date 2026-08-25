@@ -10,7 +10,7 @@ A local-first browser app for designing printable, pre-cut sticker sheets. Confi
    <tr>
       <td width="50%" align="center">
          <strong>Design in the browser</strong><br>
-         <sub>Editor with the checkerboard sheet preview and label controls.</sub><br><br>
+         <sub>Current editor with content-grid controls and a spaced sheet preview.</sub><br><br>
          <img src="docs/images/editor-preview.png" alt="Sticker Sheet Studio editor showing the sheet canvas and controls" width="360">
       </td>
       <td width="50%" align="center">
@@ -27,12 +27,17 @@ A local-first browser app for designing printable, pre-cut sticker sheets. Confi
 - Set independent page margins, label dimensions, and a shared cutout corner radius.
 - Automatically calculate the number of labels that fit on the page.
 - Edit one or more labels at once:
-  - text, size, weight, alignment, and flow direction;
-  - solid color, patterned, or image backgrounds;
-  - image crop position and zoom;
-  - print-safe inset and rounded artwork clipping.
+   - split a label into a `1 × 1` through `3 × 3` content grid with adjustable row and column proportions;
+   - edit each grid cell's text, font, size, mutually exclusive regular/bold/italic/underline style, alignment, and flow direction;
+   - solid color, patterned, or image backgrounds;
+   - optional solid, dashed, or dotted printable border with custom color and physical width;
+   - image crop position and zoom;
+   - print-safe inset and rounded artwork clipping.
+- Copy text/style by matching row and column; labels without that coordinate are skipped.
+- Copy a layout to all labels while preserving each label's content at overlapping coordinates.
 - Save templates locally in the browser and import/export template JSON.
 - Preview a sheet with a transparency checkerboard, selection state, and zoom controls.
+- Undo up to five recent editing transactions during the current browser session with the header button or `Ctrl/Cmd+Z`.
 - Open a clean **Print preview** in the Export dialog.
 - Export print-ready **SVG** and **PDF** files, or use the browser print dialog.
 
@@ -42,7 +47,7 @@ All editing and image processing occur in the browser. No account, upload servic
 
 1. Open **Sheet setup** and choose the page format, orientation, margins, and label size.
 2. Select a sticker in the preview, then open **Label editor**.
-3. Enter text and use the alignment / content-flow controls.
+3. Choose a content grid, select a cell, then enter text and use the font, alignment, and content-flow controls.
 4. Choose a background type:
    - **Solid** for a single color;
    - **Pattern** for dots or stripes;
@@ -56,9 +61,15 @@ All editing and image processing occur in the browser. No account, upload servic
 - **PDF** — a print-ready sheet at the configured page size.
 - **Template JSON** — save a reusable sheet setup and label design locally or share it as a file.
 
+### Template compatibility
+
+Template JSON includes an explicit schema version. Exports always use the current version and include sheet geometry, content grids and proportions, per-cell text styles, appearance images/crops, and printable borders. Older templates are migrated during import. Templates created by a newer unsupported app version are rejected with a specific compatibility message instead of being silently downgraded.
+
 ## Run locally
 
 Requires a current Node.js LTS release.
+
+See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
 ```bash
 npm install

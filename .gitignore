@@ -19,6 +19,18 @@ coverage/
 # Local agent-loop run ledgers (runtime-only, never commit)
 .agent-runs/
 
+# Local browser-review artifacts
+.playwright-mcp/
+font-dropdown-preview-labels.png
+font-family-style-control.png
+mobile-focused-parity.png
+mobile-rounded-cutout-preview.png
+radio-groups-uniform-borders.png
+segmented-radio-groups-mobile-expanded.png
+segmented-radio-groups-mobile.png
+segmented-radio-groups.png
+sticker-cell-layout-sidebar-mock.png
+
 # Editor and OS files
 .vscode/
 .idea/
